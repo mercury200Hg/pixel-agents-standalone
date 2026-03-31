@@ -148,7 +148,7 @@ export class JsonlWatcher extends EventEmitter {
   /**
    * Resolve an encoded path like ["Users","mercury","Documents","quizfirst","quizfirst","workspace"]
    * back to a real filesystem path by greedily joining segments with dashes when a directory exists.
-   * e.g. tries /Users -> exists, /Users/mercury -> exists, ... /quizfirst-workspace -> exists!
+   * e.g. tries /Users -> exists, /Users/alice -> exists, ... /my-project -> exists!
    */
   private resolveEncodedPath(segments: string[]): string | null {
     let current = sep; // start at root
