@@ -67,12 +67,26 @@ if 'hooks' not in settings:
 if 'PreToolUse' not in settings['hooks']:
     settings['hooks']['PreToolUse'] = []
 
-# Check for duplicate
-hook_entry = {'type': 'command', 'command': hook_command}
-already_exists = any(
-    h.get('type') == 'command' and h.get('command') == hook_command
-    for h in settings['hooks']['PreToolUse']
-)
+# The correct format: matcher + nested hooks array
+hook_entry = {
+    'matcher': '',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': hook_command,
+            'timeout': 3600
+        }
+    ]
+}
+
+# Check for duplicate (look for our command in any existing matcher group)
+already_exists = False
+for group in settings['hooks']['PreToolUse']:
+    if 'hooks' in group:
+        for h in group['hooks']:
+            if h.get('type') == 'command' and h.get('command') == hook_command:
+                already_exists = True
+                break
 
 if already_exists:
     print('Hook already configured in ' + settings_file + ' — skipping.')
@@ -93,4 +107,4 @@ echo ""
 echo "Updated: $SETTINGS_FILE"
 echo ""
 echo "Reminder: The pixel-agents server must be running at http://localhost:3456"
-echo "Start it with: cd $PIXEL_AGENTS_DIR && npm run dev"
+echo "Start it with: cd $PIXEL_AGENTS_DIR && npm start"
