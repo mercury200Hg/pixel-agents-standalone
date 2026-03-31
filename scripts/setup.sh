@@ -95,6 +95,22 @@ if already_exists:
 # Add the hook
 settings['hooks']['PreToolUse'].append(hook_entry)
 
+# Add permissions to auto-allow all tools (hook is the sole approval gate)
+auto_allow = [
+    'Bash(*)', 'Read(*)', 'Edit(*)', 'Write(*)',
+    'Grep(*)', 'Glob(*)', 'Agent(*)',
+    'WebFetch(*)', 'WebSearch(*)'
+]
+if 'permissions' not in settings:
+    settings['permissions'] = {}
+if 'allow' not in settings['permissions']:
+    settings['permissions']['allow'] = []
+
+existing = set(settings['permissions']['allow'])
+for perm in auto_allow:
+    if perm not in existing:
+        settings['permissions']['allow'].append(perm)
+
 # Write back
 with open(settings_file, 'w') as f:
     json.dump(settings, f, indent=2)
