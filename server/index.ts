@@ -1,7 +1,7 @@
 import express from "express";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -14,11 +14,12 @@ import {
   loadFurnitureAssets,
   loadDefaultLayout,
 } from "./assetLoader.js";
-import type { TrackedAgent, ServerMessage } from "./types.js";
+import { randomUUID } from "crypto";
+import type { TrackedAgent, ServerMessage, PendingApproval, RiskLevel } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3456", 10);
-const IDLE_SHUTDOWN_MS = 600_000; // 10 minutes
+const IDLE_SHUTDOWN_MS = 3_600_000; // 1 hour
 
 // State
 const agents = new Map<string, TrackedAgent>(); // sessionId -> agent
@@ -75,10 +76,160 @@ function loadPersistedSeats(): Record<number, { palette: number; hueShift: numbe
 let currentLayout = loadLayout();
 const persistedSeats = loadPersistedSeats();
 
+// Approval system state
+const pendingApprovals = new Map<string, PendingApproval>();
+const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
+
+const DESTRUCTIVE_PATTERNS = [
+  /\brm\s/, /\brmdir\s/, /\bkill\s/, /\bpkill\s/,
+  /\bgit\s+push\s+--force/, /\bgit\s+reset\s+--hard/,
+  /\bgit\s+clean\s+-[fd]/, /\bDROP\s/i, /\bDELETE\s+FROM/i,
+  /\btruncate\s/i, /\bmkfs\b/, /\bdd\s/,
+  /\bgit\s+branch\s+-D/,
+];
+
+const READING_TOOLS = new Set(["Read", "Grep", "Glob", "WebFetch", "WebSearch"]);
+
+function classifyRisk(tool: string, input: Record<string, unknown>): RiskLevel {
+  if (READING_TOOLS.has(tool)) return "read";
+  if (tool === "Bash") {
+    const cmd = (input.command as string) || "";
+    if (DESTRUCTIVE_PATTERNS.some((p) => p.test(cmd))) return "destructive";
+  }
+  return "write";
+}
+
+function summarizeTool(tool: string, input: Record<string, unknown>): string {
+  switch (tool) {
+    case "Bash": {
+      const cmd = (input.command as string) || "";
+      return `Run: ${cmd.slice(0, 80)}${cmd.length > 80 ? "..." : ""}`;
+    }
+    case "Read":
+      return `Read: ${basename(String(input.file_path || ""))}`;
+    case "Edit":
+      return `Edit: ${basename(String(input.file_path || ""))}`;
+    case "Write":
+      return `Write: ${basename(String(input.file_path || ""))}`;
+    case "Grep":
+      return `Search: "${input.pattern}" in ${basename(String(input.path || "."))}`;
+    case "Glob":
+      return `Find: ${input.pattern}`;
+    case "Agent":
+      return `Spawn agent: ${String(input.description || "").slice(0, 60)}`;
+    default:
+      return `${tool}: ${JSON.stringify(input).slice(0, 60)}`;
+  }
+}
+
 // Express app
 const app = express();
+app.use(express.json());
 // Serve production build
 app.use(express.static(join(__dirname, "public")));
+
+// Debug endpoint — list active agents (helps verify session IDs)
+app.get("/api/agents", (_req, res) => {
+  const list = Array.from(agents.values()).map((a) => ({
+    id: a.id,
+    sessionId: a.sessionId,
+    projectName: a.projectName,
+  }));
+  res.json(list);
+});
+
+// Approval endpoint — long-polls until user responds in the web UI
+app.post("/api/approve", (req, res) => {
+  const { sessionId, tool, input } = req.body || {};
+  if (!sessionId || !tool) {
+    res.status(400).json({ error: "Missing sessionId or tool" });
+    return;
+  }
+
+  // Find agent by sessionId — try exact match first, then prefix match
+  let agent = agents.get(sessionId);
+  if (!agent) {
+    for (const [key, a] of agents) {
+      if (key.startsWith(sessionId) || sessionId.startsWith(key)) {
+        agent = a;
+        break;
+      }
+    }
+  }
+
+  if (!agent) {
+    console.warn(`[Approval] No agent found for sessionId: ${sessionId}`);
+  }
+
+  const agentId = agent?.id ?? 0;
+  const toolInput = (input || {}) as Record<string, unknown>;
+  const riskLevel = classifyRisk(tool, toolInput);
+  const summary = summarizeTool(tool, toolInput);
+  const requestId = randomUUID();
+
+  // Keep the connection alive for long-polling
+  req.socket?.setTimeout(0);
+  res.writeHead(200, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+  });
+
+  let resolved = false;
+
+  const pending: PendingApproval = {
+    requestId,
+    agentId,
+    sessionId,
+    tool,
+    input: toolInput,
+    summary,
+    riskLevel,
+    resolve: (decision) => {
+      if (resolved) return;
+      resolved = true;
+      pendingApprovals.delete(requestId);
+      clearTimeout(timer);
+      broadcast({ type: "approvalResolved", requestId, decision: decision.decision });
+      res.end(JSON.stringify(decision));
+    },
+    createdAt: Date.now(),
+  };
+
+  pendingApprovals.set(requestId, pending);
+
+  // Broadcast to all connected browser clients
+  broadcast({
+    type: "approvalRequest",
+    requestId,
+    agentId,
+    tool,
+    summary,
+    riskLevel,
+    fullInput: toolInput,
+  });
+
+  console.log(`[Approval] ${agent?.projectName || sessionId.slice(0, 8)} requesting: ${summary} (${riskLevel})`);
+
+  // Timeout: auto-deny after 1 hour
+  const timer = setTimeout(() => {
+    if (!resolved) {
+      pending.resolve({ decision: "deny", scope: "once" });
+      console.log(`[Approval] Timed out: ${requestId}`);
+    }
+  }, APPROVAL_TIMEOUT_MS);
+
+  // Clean up if the hook process disconnects (e.g., killed)
+  res.on("close", () => {
+    if (!resolved) {
+      resolved = true;
+      clearTimeout(timer);
+      pendingApprovals.delete(requestId);
+      broadcast({ type: "approvalResolved", requestId, decision: "deny" });
+      console.log(`[Approval] Client disconnected: ${requestId}`);
+    }
+  });
+});
 
 const server = createServer(app);
 
@@ -159,6 +310,19 @@ function sendInitialData(ws: WebSocket): void {
     // Send null layout to trigger default layout creation in the UI
     ws.send(JSON.stringify({ type: "layoutLoaded", layout: null, version: 0 }));
   }
+
+  // Send any pending approvals so a newly opened browser can act on them
+  if (pendingApprovals.size > 0) {
+    const approvals = Array.from(pendingApprovals.values()).map((p) => ({
+      requestId: p.requestId,
+      agentId: p.agentId,
+      tool: p.tool,
+      summary: p.summary,
+      riskLevel: p.riskLevel,
+      fullInput: p.input,
+    }));
+    ws.send(JSON.stringify({ type: "pendingApprovals", approvals }));
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -185,6 +349,13 @@ wss.on("connection", (ws) => {
           }
         } catch (err) {
           console.error(`[Server] Failed to save layout: ${err instanceof Error ? err.message : err}`);
+        }
+      } else if (msg.type === "approvalResponse") {
+        const { requestId, decision, scope } = msg;
+        const pending = pendingApprovals.get(requestId);
+        if (pending) {
+          pending.resolve({ decision, scope: scope || "once" });
+          console.log(`[Approval] ${decision} (${scope}) for: ${pending.summary}`);
         }
       } else if (msg.type === "saveAgentSeats") {
         try {

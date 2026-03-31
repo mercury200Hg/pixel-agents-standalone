@@ -28,6 +28,22 @@ export interface TrackedAgent {
   lastActivityTime: number;
 }
 
+// Risk levels for approval requests
+export type RiskLevel = "read" | "write" | "destructive";
+
+// A pending approval request
+export interface PendingApproval {
+  requestId: string;
+  agentId: number;
+  sessionId: string;
+  tool: string;
+  input: Record<string, unknown>;
+  summary: string;
+  riskLevel: RiskLevel;
+  resolve: (decision: { decision: string; scope: string }) => void;
+  createdAt: number;
+}
+
 // Messages sent from server to client via WebSocket
 // Must match the upstream message format expected by useExtensionMessages
 export type ServerMessage =
@@ -49,11 +65,15 @@ export type ServerMessage =
   | { type: "wallTilesLoaded"; sprites: unknown[] }
   | { type: "furnitureAssetsLoaded"; catalog: unknown[]; sprites: Record<string, unknown> }
   | { type: "layoutLoaded"; layout: unknown; version: number }
-  | { type: "settingsLoaded"; soundEnabled: boolean };
+  | { type: "settingsLoaded"; soundEnabled: boolean }
+  | { type: "approvalRequest"; requestId: string; agentId: number; tool: string; summary: string; riskLevel: RiskLevel; fullInput: Record<string, unknown> }
+  | { type: "approvalResolved"; requestId: string; decision: string }
+  | { type: "pendingApprovals"; approvals: Array<{ requestId: string; agentId: number; tool: string; summary: string; riskLevel: RiskLevel; fullInput: Record<string, unknown> }> };
 
 // Messages sent from client to server
 export type ClientMessage =
   | { type: "ready" }
   | { type: "webviewReady" }
   | { type: "saveLayout"; layout: unknown }
-  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> };
+  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> }
+  | { type: "approvalResponse"; requestId: string; decision: "allow" | "deny"; scope: "once" | "session" };

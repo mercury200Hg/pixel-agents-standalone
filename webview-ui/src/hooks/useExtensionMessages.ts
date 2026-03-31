@@ -40,6 +40,17 @@ export interface WorkspaceFolder {
   path: string
 }
 
+export type RiskLevel = "read" | "write" | "destructive"
+
+export interface ApprovalRequest {
+  requestId: string
+  agentId: number
+  tool: string
+  summary: string
+  riskLevel: RiskLevel
+  fullInput: Record<string, unknown>
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
@@ -50,6 +61,7 @@ export interface ExtensionMessageState {
   layoutReady: boolean
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> }
   workspaceFolders: WorkspaceFolder[]
+  pendingApprovals: ApprovalRequest[]
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -75,6 +87,7 @@ export function useExtensionMessages(
   const [layoutReady, setLayoutReady] = useState(false)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([])
+  const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([])
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
@@ -353,6 +366,38 @@ export function useExtensionMessages(
         } catch (err) {
           console.error(`❌ Webview: Error processing furnitureAssetsLoaded:`, err)
         }
+      } else if (msg.type === 'approvalRequest') {
+        const approval: ApprovalRequest = {
+          requestId: msg.requestId as string,
+          agentId: msg.agentId as number,
+          tool: msg.tool as string,
+          summary: msg.summary as string,
+          riskLevel: msg.riskLevel as RiskLevel,
+          fullInput: msg.fullInput as Record<string, unknown>,
+        }
+        setPendingApprovals((prev) => {
+          if (prev.some((a) => a.requestId === approval.requestId)) return prev
+          return [...prev, approval]
+        })
+        // Show permission bubble on the agent
+        os.showPermissionBubble(approval.agentId)
+      } else if (msg.type === 'approvalResolved') {
+        const requestId = msg.requestId as string
+        setPendingApprovals((prev) => {
+          const next = prev.filter((a) => a.requestId !== requestId)
+          // Clear permission bubble if no more pending approvals for this agent
+          const resolved = prev.find((a) => a.requestId === requestId)
+          if (resolved && !next.some((a) => a.agentId === resolved.agentId)) {
+            os.clearPermissionBubble(resolved.agentId)
+          }
+          return next
+        })
+      } else if (msg.type === 'pendingApprovals') {
+        const approvals = (msg.approvals as ApprovalRequest[]) || []
+        setPendingApprovals(approvals)
+        for (const a of approvals) {
+          os.showPermissionBubble(a.agentId)
+        }
       }
     }
     window.addEventListener('message', handler)
@@ -360,5 +405,5 @@ export function useExtensionMessages(
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders }
+  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, pendingApprovals }
 }
