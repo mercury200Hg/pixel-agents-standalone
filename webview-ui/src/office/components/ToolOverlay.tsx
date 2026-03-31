@@ -1,19 +1,77 @@
 import { useState, useEffect } from 'react'
 import type { ToolActivity } from '../types.js'
 import type { OfficeState } from '../engine/officeState.js'
-import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js'
+import type { SubagentCharacter, ApprovalRequest } from '../../hooks/useExtensionMessages.js'
 import { TILE_SIZE, CharacterState } from '../types.js'
 import { TOOL_OVERLAY_VERTICAL_OFFSET, CHARACTER_SITTING_OFFSET_PX } from '../../constants.js'
+import { vscode } from '../../vscodeApi.js'
 
 interface ToolOverlayProps {
   officeState: OfficeState
   agents: number[]
   agentTools: Record<number, ToolActivity[]>
   subagentCharacters: SubagentCharacter[]
+  pendingApprovals: ApprovalRequest[]
   containerRef: React.RefObject<HTMLDivElement | null>
   zoom: number
   panRef: React.RefObject<{ x: number; y: number }>
   onCloseAgent: (id: number) => void
+}
+
+const RISK_COLORS: Record<string, string> = {
+  read: 'var(--pixel-risk-read)',
+  write: 'var(--pixel-risk-write)',
+  destructive: 'var(--pixel-risk-destructive)',
+}
+
+function ApprovalButtons({ approval }: { approval: ApprovalRequest }) {
+  const [hovered, setHovered] = useState<string | null>(null)
+
+  const respond = (decision: 'allow' | 'deny', scope: 'once' | 'session') => {
+    vscode.postMessage({ type: 'approvalResponse', requestId: approval.requestId, decision, scope })
+  }
+
+  const btnBase: React.CSSProperties = {
+    fontSize: '16px',
+    padding: '1px 6px',
+    border: '1px solid var(--pixel-border)',
+    borderRadius: 0,
+    cursor: 'pointer',
+    color: '#fff',
+    lineHeight: 1.2,
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: 3, marginTop: 3 }}>
+      <button
+        style={{ ...btnBase, background: hovered === 'allow' ? 'var(--pixel-approve-hover)' : 'var(--pixel-approve-bg)' }}
+        onClick={(e) => { e.stopPropagation(); respond('allow', 'once') }}
+        onMouseEnter={() => setHovered('allow')}
+        onMouseLeave={() => setHovered(null)}
+        title="Allow this tool call"
+      >
+        Allow
+      </button>
+      <button
+        style={{ ...btnBase, background: hovered === 'session' ? 'var(--pixel-approve-hover)' : 'var(--pixel-approve-bg)' }}
+        onClick={(e) => { e.stopPropagation(); respond('allow', 'session') }}
+        onMouseEnter={() => setHovered('session')}
+        onMouseLeave={() => setHovered(null)}
+        title="Allow this tool type for the rest of the session"
+      >
+        Session
+      </button>
+      <button
+        style={{ ...btnBase, background: hovered === 'deny' ? 'var(--pixel-deny-hover)' : 'var(--pixel-deny-bg)' }}
+        onClick={(e) => { e.stopPropagation(); respond('deny', 'once') }}
+        onMouseEnter={() => setHovered('deny')}
+        onMouseLeave={() => setHovered(null)}
+        title="Deny this tool call"
+      >
+        Deny
+      </button>
+    </div>
+  )
 }
 
 /** Derive a short human-readable activity string from tools/status */
@@ -45,6 +103,7 @@ export function ToolOverlay({
   agents,
   agentTools,
   subagentCharacters,
+  pendingApprovals,
   containerRef,
   zoom,
   panRef,
@@ -98,33 +157,46 @@ export function ToolOverlay({
         // Always show name label; show activity details on hover/select
         const displayName = ch.folderName || (isSub ? 'Subtask' : `Agent #${id}`)
 
+        // Check for pending approval for this agent
+        const agentApprovals = pendingApprovals.filter((a) => a.agentId === id)
+        const hasApproval = agentApprovals.length > 0
+
         // Get activity text (only needed when showing details)
         let activityText = ''
         let dotColor: string | null = null
-        if (showDetails) {
-          const subHasPermission = isSub && ch.bubbleType === 'permission'
-          if (isSub) {
-            if (subHasPermission) {
-              activityText = 'Needs approval'
-            } else {
-              const sub = subagentCharacters.find((s) => s.id === id)
-              activityText = sub ? sub.label : 'Subtask'
-            }
+        if (showDetails || hasApproval) {
+          if (hasApproval) {
+            const approval = agentApprovals[0]
+            activityText = approval.summary
+            dotColor = RISK_COLORS[approval.riskLevel] || 'var(--pixel-status-permission)'
           } else {
-            activityText = getActivityText(id, agentTools, ch.isActive)
-          }
+            const subHasPermission = isSub && ch.bubbleType === 'permission'
+            if (isSub) {
+              if (subHasPermission) {
+                activityText = 'Needs approval'
+              } else {
+                const sub = subagentCharacters.find((s) => s.id === id)
+                activityText = sub ? sub.label : 'Subtask'
+              }
+            } else {
+              activityText = getActivityText(id, agentTools, ch.isActive)
+            }
 
-          const tools = agentTools[id]
-          const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done)
-          const hasActiveTools = tools?.some((t) => !t.done)
-          const isActive = ch.isActive
+            const tools = agentTools[id]
+            const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done)
+            const hasActiveTools = tools?.some((t) => !t.done)
+            const isActive = ch.isActive
 
-          if (hasPermission) {
-            dotColor = 'var(--pixel-status-permission)'
-          } else if (isActive && hasActiveTools) {
-            dotColor = 'var(--pixel-status-active)'
+            if (hasPermission) {
+              dotColor = 'var(--pixel-status-permission)'
+            } else if (isActive && hasActiveTools) {
+              dotColor = 'var(--pixel-status-active)'
+            }
           }
         }
+
+        // Approval cards are always interactive
+        const isInteractive = isSelected || hasApproval
 
         return (
           <div
@@ -137,11 +209,64 @@ export function ToolOverlay({
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              pointerEvents: isSelected ? 'auto' : 'none',
-              zIndex: isSelected ? 'var(--pixel-overlay-selected-z)' : 'var(--pixel-overlay-z)',
+              pointerEvents: isInteractive ? 'auto' : 'none',
+              zIndex: hasApproval ? 'var(--pixel-overlay-selected-z)' : isSelected ? 'var(--pixel-overlay-selected-z)' : 'var(--pixel-overlay-z)',
             }}
           >
-            {showDetails ? (
+            {hasApproval ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  background: 'var(--pixel-bg)',
+                  border: `2px solid ${RISK_COLORS[agentApprovals[0].riskLevel] || 'var(--pixel-border)'}`,
+                  borderRadius: 0,
+                  padding: '4px 8px',
+                  boxShadow: 'var(--pixel-shadow)',
+                  maxWidth: 280,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      background: dotColor || 'var(--pixel-status-permission)',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: '16px',
+                      color: 'var(--pixel-text-dim)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {displayName}
+                  </span>
+                </div>
+                <span
+                  style={{
+                    fontSize: '20px',
+                    color: 'var(--vscode-foreground)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    display: 'block',
+                    marginTop: 2,
+                  }}
+                >
+                  {activityText}
+                </span>
+                <ApprovalButtons approval={agentApprovals[0]} />
+                {agentApprovals.length > 1 && (
+                  <span style={{ fontSize: '14px', color: 'var(--pixel-text-dim)', marginTop: 2 }}>
+                    +{agentApprovals.length - 1} more pending
+                  </span>
+                )}
+              </div>
+            ) : showDetails ? (
               <div
                 style={{
                   display: 'flex',

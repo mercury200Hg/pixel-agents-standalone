@@ -51,6 +51,15 @@
   --pixel-status-permission: var(--vscode-charts-yellow, #cca700);
   --pixel-status-active: var(--vscode-charts-blue, #3794ff);
 
+  /* Approval risk colors */
+  --pixel-risk-read: #3794ff;
+  --pixel-risk-write: #cca700;
+  --pixel-risk-destructive: #f44747;
+  --pixel-approve-bg: rgba(90, 200, 140, 0.25);
+  --pixel-approve-hover: rgba(90, 200, 140, 0.45);
+  --pixel-deny-bg: rgba(244, 71, 71, 0.25);
+  --pixel-deny-hover: rgba(244, 71, 71, 0.45);
+
   /* ToolOverlay z-index layers */
   --pixel-overlay-z: 100;
   --pixel-overlay-selected-z: 110;
